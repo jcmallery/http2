@@ -16,10 +16,19 @@
 
 (mgl-pax:defsection @overlay
     ()
-  (http2-stream-with-input-stream class))
+  (http2-stream-with-input-stream class)
+  (available-window-size function))
+
+(defun available-window-size (http-stream &optional (connection (get-connection http-stream)))
+  "Smaller of connection and stream window size. You should not send in the data
+frame for the stream more than this."
+  (min (get-peer-window-size connection) (get-peer-window-size http-stream)))
+
+
 
 (defmethod stream-element-type ((stream binary-stream))
   '(unsigned-byte 8))
+
 
 
 (defclass payload-stream (binary-stream)
@@ -78,7 +87,7 @@ Special cases:
     (when (>= (fill-pointer output-buffer)
               (get-max-peer-frame-size connection))
       (send-buffer-to-peer output-buffer
-                           (min peer-window-size (get-peer-window-size connection))
+                           (available-window-size stream connection)
                            base-http2-stream connection))))
 
 (defmethod close ((stream payload-output-stream) &key &allow-other-keys)
@@ -123,15 +132,14 @@ Return new START."
     (incf start size)))
 
 (defun wait-for-window-is-at-least-frame-size (connection http-stream)
-  (loop for allowed-window = (min (get-peer-window-size connection)
-                                  (get-peer-window-size http-stream))
+  (loop for allowed-window = (available-window-size http-stream connection)
         for frame-size = (get-max-peer-frame-size connection)
         while (> frame-size allowed-window)
         do (read-frame connection)
-#+nil(loop until
-       (restart-case
+        #+nil(loop until
+                   (restart-case
 
-           (read-again ())))))
+                       (read-again ())))))
 
 
 (define-condition window-is-closed (condition)
