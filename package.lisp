@@ -27,7 +27,7 @@
   (:use #:cl #:http2/core #:cl+ssl #:mgl-pax #:http2/openssl))
 
 (mgl-pax:define-package #:http2/stream-overlay
-    (:use #:cl #:http2/core #:http2/utils)
+    (:use #:cl #:http2/core #:http2/utils #:mgl-pax)
   (:import-from #:anaphora #:acond #:awhen #:aif #:it))
 
 (mgl-pax:define-package #:http2/client

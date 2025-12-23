@@ -14,21 +14,44 @@
 ;;;; -> transport stream
 ;;;;
 
-(mgl-pax:defsection @overlay
-    ()
-  (http2-stream-with-input-stream class)
-  (available-window-size function))
+(defsection @payload-streams-ref (:title "HTTP/2 streams as CL streams")
+  "There is an abstraction implemented that allows to write data to HTTP/2 streams
+as if it was a Common Lisp STREAM. The data written to the CL stream are encoded
+to octets, then possibly compressed, and send out to the peer in data
+frames. Closing the CL stream ends the HTTP/2 stream. Flushing or forcing CL
+streams flushes the HTTP/2 stream.
+
+The only - but significant - issue is that due to the nature of the protocol,
+the rate of sending the data after initial burst is limited by how fast the
+other side accepts it. If you send too much too fast, your endpoint thread might
+block. This can impact negatively other streams (in multi-thread server) or even
+other connections (in poll server). On client it is probably fine.
+
+What you should do is to schedule further writes to the stream for later. Yes,
+this complicates things, so you can also reset the stream if window is too
+small (maybe better that impact other connections/streams)
+
+The \"Look before you leap\" approach is to use AVAILABLE-WINDOW-SIZE before you
+send. Note that the size is for octets, and compression as well as multibyte
+character encoding may change the numbers.
+
+The \"Easier to ask for forgiveness than permission\" approach is to handle the
+WINDOW-IS-CLOSED condition.
+
+It is also possible to treat HTTP/2 stream as an INPUT-STREAM. This will
+definitively block, so use in a client when you wait for data from single
+stream, but not for the server."
+  (available-window-size function)
+  (window-is-closed condition)
+  (payload-output-stream class)
+  (http2-stream-with-input-stream class))
 
 (defun available-window-size (http-stream &optional (connection (get-connection http-stream)))
   "Smaller of connection and stream window size. You should not send in the data
 frame for the stream more than this."
   (min (get-peer-window-size connection) (get-peer-window-size http-stream)))
 
-
-
-(defmethod stream-element-type ((stream binary-stream))
-  '(unsigned-byte 8))
-
+(defmethod stream-element-type ((stream binary-stream)) '(unsigned-byte 8))
 
 
 (defclass payload-stream (binary-stream)
@@ -37,11 +60,12 @@ frame for the stream more than this."
    "Base class for a CL binary stream that is defined over http2 stream"))
 
 (defclass payload-output-stream (payload-stream trivial-gray-streams:fundamental-binary-output-stream)
-  ((output-buffer   :accessor get-output-buffer))
+  ((output-buffer :accessor get-output-buffer))
   (:default-initargs :to-write 0 :to-store 0)
   (:documentation
-   "Binary stream that accepts new octets to the output-buffer, until it is big
-enough to send the data as a data frame on BASE-HTTP2-STREAM (or forced to by close of force-output) "))
+   "Binary gray output stream build upon an HTTP/2 stream. It accepts new octets to
+the output-buffer, until it is big enough to send the data as a data frame on
+the underlying stream."))
 
 (defmethod initialize-instance :after ((stream payload-output-stream)
                                        &key
@@ -56,12 +80,6 @@ enough to send the data as a data frame on BASE-HTTP2-STREAM (or forced to by cl
   `(with-slots (output-buffer base-http2-stream) ,stream
      (with-slots (connection peer-window-size state) base-http2-stream
        ,@body)))
-
-(define-condition http2-write-data-stall (warning)
-  ((sent :reader get-sent :initarg :sent)
-   (data :reader get-data :initarg :data))
-  (:documentation "Signalled when data are to be sent and there is not big enough window available
-to sent. Tracks DATA to sent and number of octets actually SENT."))
 
 (defun send-buffer-to-peer (output-buffer peer-window-size stream connection)
   (loop while (< peer-window-size (length output-buffer))
@@ -141,23 +159,41 @@ Return new START."
 
                        (read-again ())))))
 
+#+unused
+(define-condition http2-write-data-stall (warning)
+  ((sent :reader get-sent :initarg :sent)
+   (data :reader get-data :initarg :data))
+  (:documentation "Signalled when data are to be sent and there is not big enough window available
+to sent. Tracks DATA to sent and number of octets actually SENT."))
+
 
 (define-condition window-is-closed (condition)
   ((start :accessor get-start :initarg :start)
-   (data  :accessor get-data  :initarg :data)))
+   (data  :accessor get-data  :initarg :data))
+  (:report "Not all data could be sent to peer. Peer window too small."))
 
 (defmethod print-object ((o window-is-closed) stream)
-  (with-slots (start data) o
-    (print-unreadable-object (o stream)
-      (format o "at ~d of ~d" start (length data)))))
+  (if *print-escape*
+      (with-slots (start data) o
+        (print-unreadable-object (o stream)
+          (format o "at ~d of ~d" start (length data))))
+      (call-next-method)))
+
 
 (defmethod trivial-gray-streams:stream-write-sequence
     ((stream payload-output-stream) sequence start end &key)
+  "Write binary sequence to the payload stream.
+
+The stream possibly already has some data in its OUTPUT-BUFFER, and we add some.
+
+Write out as many maximum size data frames as possible.
+Cases:
+
+- We have more than max-peer-frame-size data, and peer window is above it -> we can send a frame or more
+- We do not have enough data (full frame) yet - we wait for more data
+- We have more than max-peer-frame-size, but window is too small -> we read a frame
+"
   (with-output-payload-slots stream
-    ;; Situations:
-    ;; - We have more than max-peer-frame-size data, and peer window is above it -> we can send a frame and go on
-    ;; - We do not have enough data (full frame) yet - we wait for more data
-    ;; - We have more than max-peer-frame-size, but window is too small -> we read a frame
     (let ((total-length (- (+ (or end (length sequence))
                               (length (get-output-buffer stream)))
                            start)))
@@ -165,6 +201,10 @@ Return new START."
         for frame-size = (get-max-peer-frame-size connection)
         while (and (>= total-length frame-size))
         do
+           ;; FIXME: this signals too often, even when window is OK.
+           ;; maybe we should store data away so that it "works", even ineffectively,
+           ;; out of box.
+           ;; and we should not wait but schedule for future.
            (signal 'window-is-closed :start start :data sequence)
            (wait-for-window-is-at-least-frame-size connection base-http2-stream)
            (setf start (send-data stream  sequence start
