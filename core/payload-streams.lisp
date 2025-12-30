@@ -46,11 +46,6 @@ stream, but not for the server."
   (payload-output-stream class)
   (http2-stream-with-input-stream class))
 
-(defun available-window-size (http-stream &optional (connection (get-connection http-stream)))
-  "Smaller of connection and stream window size. You should not send in the data
-frame for the stream more than this."
-  (min (get-peer-window-size connection) (get-peer-window-size http-stream)))
-
 (defmethod stream-element-type ((stream binary-stream)) '(unsigned-byte 8))
 
 
@@ -60,35 +55,17 @@ frame for the stream more than this."
    "Base class for a CL binary stream that is defined over http2 stream"))
 
 (defclass payload-output-stream (payload-stream trivial-gray-streams:fundamental-binary-output-stream)
-  ((output-buffer :accessor get-output-buffer))
-  (:default-initargs :to-write 0 :to-store 0)
+  (#+moved(output-buffer :accessor get-output-buffer))
+#+nil  (:default-initargs :to-write 0 :to-store 0)
   (:documentation
    "Binary gray output stream build upon an HTTP/2 stream. It accepts new octets to
 the output-buffer, until it is big enough to send the data as a data frame on
 the underlying stream."))
 
-(defmethod initialize-instance :after ((stream payload-output-stream)
-                                       &key
-                                         base-http2-stream
-                                         (connection (get-connection base-http2-stream))
-                                         (window-size (min 65536 (get-initial-peer-window-size connection)))  &allow-other-keys)
-  (setf (get-output-buffer stream)
-        (make-array window-size :element-type '(unsigned-byte 8)
-                                :fill-pointer 0 :adjustable nil)))
-
 (defmacro with-output-payload-slots (stream &body body)
-  `(with-slots (output-buffer base-http2-stream) ,stream
-     (with-slots (connection peer-window-size state) base-http2-stream
+  `(with-slots (base-http2-stream) ,stream
+     (with-slots (connection peer-window-size state output-buffer) base-http2-stream
        ,@body)))
-
-(defun send-buffer-to-peer (output-buffer peer-window-size stream connection)
-  (loop while (< peer-window-size (length output-buffer))
-        ;; we want to send more than window allows, so lets wait for more
-        ;; window
-        ;; this assumes that the client will not shrink the window too much.
-        do (read-frame connection))
-  (write-data-frame stream output-buffer)
-  (setf (fill-pointer output-buffer) 0))
 
 (defmethod trivial-gray-streams:stream-write-byte ((stream payload-output-stream) byte)
   "Write an octet to the output buffer.
@@ -97,57 +74,46 @@ Special cases:
 
 - Buffer is full -> warn and do nothing (FIXME: handle it somehow)
 - Buffer contains more that max peer frame size octets -> send the data out "
-  (with-output-payload-slots stream
-    (if (< (fill-pointer output-buffer) (array-dimension output-buffer 0))
-        (vector-push byte output-buffer)
-        (warn "Not enough space in buffer: ~d<~d"
-              (fill-pointer output-buffer) (array-dimension output-buffer 0)))
-    (when (>= (fill-pointer output-buffer)
-              (get-max-peer-frame-size connection))
-      (send-buffer-to-peer output-buffer
-                           (available-window-size stream connection)
-                           base-http2-stream connection))))
+  (write-octet-to-stream (get-base-http2-stream stream) byte))
 
 (defmethod close ((stream payload-output-stream) &key &allow-other-keys)
-  (with-output-payload-slots stream
-      ;; FIXME: here we know (aside of intervening setting changes) that the
-      ;; output buffer is smaller than max-frame-size, but it still might be
-      ;; larger than the window.
+  (flush-stream-buffer (get-base-http2-stream stream) t)
+#+nil  (with-output-payload-slots stream
+    ;; FIXME: here we know (aside of intervening setting changes) that the
+    ;; output buffer is smaller than max-frame-size, but it still might be
+    ;; larger than the window.
 
-      ;; Should we handle also RST on send?
-      (unless (eq 'http2/core::closed state)
-        (write-data-frame base-http2-stream output-buffer :end-stream t)
-        (flush-http2-data connection))))
+    ;; Should we handle also RST on send?
+    (unless (eq 'http2/core::closed state)
+      (write-data-frame base-http2-stream output-buffer :end-stream t)
+      (flush-http2-data connection))))
 
 (defmethod trivial-gray-streams:stream-force-output ((stream payload-output-stream))
-  (with-output-payload-slots stream
-    (unless (zerop (length output-buffer))
-      (write-data-frame base-http2-stream output-buffer :end-stream nil)
-      (setf (fill-pointer output-buffer) 0))
-    (flush-http2-data connection)))
+  (flush-stream-buffer (get-base-http2-stream stream) nil))
 
 ;; TODO: finish-output could wait for window updates arriving. Except afaics
 ;; noone forces the other side to keep window size unchanged over time...
 
-(defun send-data (stream sequence start size)
+(defun end-data (stream sequence start size)
   "Send data in OUTPUT-BUFFER and SIZE data from SEQUENCE starting at START in
   one data frame; mark them as sent.
 
 Return new START."
-  (with-slots (output-buffer base-http2-stream) stream
-    (write-data-frame-multi base-http2-stream
-                      (if (zerop (length output-buffer))
-                          (make-array size
-                                      :displaced-to sequence
-                                      :displaced-index-offset start
-                                      :element-type '(unsigned-byte 8))
-                          (list output-buffer
-                                (make-array size
-                                            :displaced-to sequence
-                                            :displaced-index-offset start
-                                            :element-type '(unsigned-byte 8)))))
-    (setf (fill-pointer output-buffer) 0)
-    (incf start size)))
+  (with-slots (base-http2-stream) stream
+    (with-slots (output-buffer) base-http2-stream
+      (write-data-frame-multi base-http2-stream
+                              (if (zerop (length output-buffer))
+                                  (make-array size
+                                              :displaced-to sequence
+                                              :displaced-index-offset start
+                                              :element-type '(unsigned-byte 8))
+                                  (list output-buffer
+                                        (make-array size
+                                                    :displaced-to sequence
+                                                    :displaced-index-offset start
+                                                    :element-type '(unsigned-byte 8)))))
+      (setf (fill-pointer output-buffer) 0)
+      (incf start size))))
 
 (defun wait-for-window-is-at-least-frame-size (connection http-stream)
   (loop for allowed-window = (available-window-size http-stream connection)
@@ -182,20 +148,10 @@ to sent. Tracks DATA to sent and number of octets actually SENT."))
 
 (defmethod trivial-gray-streams:stream-write-sequence
     ((stream payload-output-stream) sequence start end &key)
-  "Write binary sequence to the payload stream.
-
-The stream possibly already has some data in its OUTPUT-BUFFER, and we add some.
-
-Write out as many maximum size data frames as possible.
-Cases:
-
-- We have more than max-peer-frame-size data, and peer window is above it -> we can send a frame or more
-- We do not have enough data (full frame) yet - we wait for more data
-- We have more than max-peer-frame-size, but window is too small -> we read a frame
-"
-  (with-output-payload-slots stream
+  (http2/core::write-sequence-to-stream (get-base-http2-stream stream) sequence start end)
+#+old  (with-output-payload-slots stream
     (let ((total-length (- (+ (or end (length sequence))
-                              (length (get-output-buffer stream)))
+                              (length output-buffer))
                            start)))
       (loop
         for frame-size = (get-max-peer-frame-size connection)

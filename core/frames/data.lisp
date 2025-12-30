@@ -17,11 +17,16 @@ the windows is maintained by the FLOW-CONTROL-MIXIN."
   (flow-control-mixin class)
   (get-peer-window-size generic-function)
   (apply-window-size-increment generic-function)
-  (long-write function))
+  (long-write function)
+  (available-window-size function))
+
+(declaim (ftype (function (flow-control-mixin) window-size) get-peer-window-size))
 
 (defclass flow-control-mixin ()
-  ((window-size      :accessor get-window-size      :initarg :window-size)
-   (peer-window-size :accessor get-peer-window-size :initarg :peer-window-size)
+  ((window-size      :accessor get-window-size      :initarg :window-size
+                     :type window-size)
+   (peer-window-size :accessor get-peer-window-size :initarg :peer-window-size
+                     :type window-size)
    (window-open-fn   :accessor get-window-open-fn   :initarg :window-open-fn
                      :initform nil
                      :documentation "Reference to a function to call when the window is extended. This is used in the
@@ -30,7 +35,138 @@ handler for /long in the demo.lisp example."))
    "The flow control parameters that are kept both per-stream and per-connection.
 
 In addition to the accounting items (current window size of both endpoints) it
-also tracks a callback to be called when window is increased (WINDOW-OPEN-FN)."))
+also has an output buffer and tracks a callback to be called when window is
+increased (WINDOW-OPEN-FN)."))
+
+(defun available-window-size (http-stream &optional (connection (get-connection http-stream)))
+  "Smaller of connection and stream window size. You should not send in the data
+frame for the stream more than this."
+  (min (get-peer-window-size connection) (get-peer-window-size http-stream)))
+
+(defsection @buffered ()
+  "BUFFERED-STREAM mixin implements flow control on the senders side.
+
+It accepts new data with WRITE-OCTET-TO-STREAM and WRITE-SEQUENCE-TO-STREAM and
+FLUSH-STREAM-BUFFER uses generic functions WRITE-BUFFERED-FRAME and to pass the
+data and signals further."
+  (buffered-stream class)
+  (write-octet-to-stream function)
+  (write-sequence-to-stream function)
+  (flush-stream-buffer function)
+  (send-available-data function))
+
+(defvar *default-stream-buffer-size* 65536
+  "Buffer size for buffers. Default is chosen same as the default initial frame
+size for buffers, which is 65536.")
+
+(declaim (ftype (function (t) (integer 0 #.array-dimension-limit)) get-flush-mark)
+         (ftype (function (t) octet-vector) get-output-buffer))
+
+(defclass buffered-stream (flow-control-mixin)
+  ((output-buffer :accessor get-output-buffer :initarg :output-buffer
+                  :documentation "Data to send, window permitting.")
+   (flush-mark    :accessor get-flush-mark    :initarg :flush-mark
+                  :type fixnum
+                  :documentation "Data up to FLUSH-MARK are flushed, i.e., they should be sent even when less than
+a full frame. Still, write can be delayed due to sufficient window not available.")
+   (to-close      :accessor get-to-close      :initarg :to-close))
+  (:documentation
+   "Hold queue of data to write in a buffer. Some of the data (flushed) are to be
+sent as soon as possible given flow control constrains, the rest is to be send
+when it is efficient (to prevent small frames).")
+  (:default-initargs :output-buffer
+                     (make-array *default-stream-buffer-size* :element-type '(unsigned-byte 8)
+                                                              :fill-pointer 0 :adjustable nil)
+                     :flush-mark -1 :to-close nil))
+
+(defgeneric write-buffered-frame (http-stream buffer offset size end-stream)
+  ;; this is split out to allow override for debugging and testing
+  (:documentation "Send a single buffered frame to HTTP-STREAM.")
+  (:method (stream buffer offset size end-stream)
+    (write-data-frame-region stream buffer offset size :end-stream end-stream)))
+
+(defun send-available-data (http-stream)
+  "Send queued data to the peer, respecting the peer window size limit and frame size efficiency.
+
+Specifically, send data while either
+- they fit full frame and full frame window is open,
+- there are data to flush and they fit the window,  "
+  (declare (type http2-stream http-stream))
+  (loop
+    with available-window of-type window-size = (available-window-size http-stream)
+    and peer-frame-size = (get-max-peer-frame-size (get-connection http-stream))
+    and buffer = (get-output-buffer http-stream)
+    and offset of-type fixnum = 0
+    and flush-mark = (get-flush-mark http-stream)
+    with fill-pointer = (fill-pointer buffer)
+    for tentative-size = (min peer-frame-size (- fill-pointer offset)) ; how much can we write in one frame
+    while (and (>= available-window peer-frame-size) ; window allows to write full frame
+               (or (> flush-mark offset)             ; do not buffer flush data
+                   (= tentative-size peer-frame-size)))
+    do
+       (write-buffered-frame http-stream buffer offset tentative-size
+                             (and (get-to-close http-stream)
+                                  (= fill-pointer (+ offset tentative-size))))
+       (incf offset tentative-size)
+       (decf available-window offset)
+    finally
+       (when (plusp offset)
+         (replace buffer buffer :start1 0 :start2 offset)
+         (setf (fill-pointer buffer) (- fill-pointer offset))
+         (setf (get-flush-mark http-stream) (max -1 (- (get-flush-mark http-stream) offset)))
+         (flush-http2-data (get-connection http-stream)))
+       (return (>= available-window peer-frame-size))))
+
+(defmacro with-buffer-slots (stream &body body)
+  `(with-slots (connection peer-window-size state output-buffer) ,stream
+     ,@body))
+
+(defvar *buffer-grow-limit* (* 16 65536))
+
+(defun maybe-grow-buffer (buffer &optional (target 0))
+  (cond
+    ((> target *buffer-grow-limit*)
+     (cerror "Ok" "Too much data written and waiting."))
+    ((>= target (array-dimension buffer 0))
+     (adjust-array buffer (max target
+                               (* 2 (array-dimension buffer 0)))))))
+
+(defun write-octet-to-stream (stream byte)
+  "Write an octet to the output buffer.
+
+Special cases:
+
+- Buffer is full -> extend it
+- Buffer contains more that max peer frame size octets -> send the data out "
+  (with-buffer-slots stream
+    (when (= (fill-pointer output-buffer)) (array-dimension output-buffer 0)
+          (adjust-array output-buffer (* 2 (array-dimension output-buffer 0))))
+    (vector-push byte output-buffer)
+    (when (>= (fill-pointer output-buffer)
+              (get-max-peer-frame-size connection))
+      (send-available-data stream))))
+
+(defun write-sequence-to-stream (stream sequence start end)
+  "Write an octet to the output buffer, possibly extending it and sending out.
+
+- Buffer is full -> extend it
+- Buffer contains more that max peer frame size octets -> send the data out "
+  (with-buffer-slots stream
+    (let* ((old-fill (fill-pointer output-buffer))
+           (new-fill (+ (- end start) old-fill)))
+      (when (>= new-fill (array-dimension output-buffer 0))
+        (adjust-array output-buffer (min new-fill
+                                         (* 2 (array-dimension output-buffer 0)))))
+      (setf (fill-pointer output-buffer) new-fill)
+      (replace output-buffer sequence :start1 old-fill :start2 start
+                                      :end2 end))
+    (send-available-data stream)))
+
+(defun flush-stream-buffer (stream end-stream-p)
+  (with-buffer-slots stream
+    (setf (get-flush-mark stream) (fill-pointer (get-output-buffer stream))
+          (get-to-close stream) end-stream-p)
+    (send-available-data stream)))
 
 (define-condition duplicit-long-write ()
   ((old-action :accessor get-old-action :initarg :old-action)
@@ -49,7 +185,6 @@ also tracks a callback to be called when window is increased (WINDOW-OPEN-FN).")
            ((or null compiled-function) action))
   (with-slots (peer-window-size window-open-fn connection) stream
     (with-slots ((connection-window peer-window-size)) connection
-
       (loop
         (cond ((null action)
                (setf window-open-fn nil)
@@ -97,8 +232,18 @@ the stream or connection, and possibly calls WINDOW-OPEN-FN.")
   (:method ((object flow-control-mixin) increment)
     (with-slots (window-open-fn peer-window-size) object
       (incf peer-window-size increment)
+      ;; FIXME: If a sender receives a WINDOW_UPDATE that causes a flow-control window
+      ;; to exceed this maximum, it MUST terminate either the stream or the
+      ;; connection, as appropriate. For streams, the sender sends a RST_STREAM
+      ;; with an error code of FLOW_CONTROL_ERROR; for the connection, a GOAWAY
+      ;; frame with an error code of FLOW_CONTROL_ERROR is sent.
       (when window-open-fn
         (continue-long-write object window-open-fn (get-max-peer-frame-size (get-connection object))))))
+  (:method ((object buffered-stream) increment)
+    (with-slots (window-open-fn peer-window-size) object
+      (incf peer-window-size increment)
+      (when (and (send-available-data object) window-open-fn)
+        (funcall window-open-fn))))
 
   (:method :after ((object multi-part-data-stream) increment)
     (with-slots (window-size-increment-callback) object
@@ -465,7 +610,7 @@ As always, use untrace to stop tracing."
     nil
     nil)
 
-(defun write-data-frame (stream data &rest keys &key padded end-stream)
+(defun write-data-frame (stream data &rest keys &key padded end-stream (start 0) (length (length data)))
   "```
   +---------------+-----------------------------------------------+
   |                            Data (*)                         ...
@@ -477,13 +622,31 @@ As always, use untrace to stop tracing."
   for instance, to carry HTTP request or response payloads."
   (declare (ignore padded end-stream)
            (octet-vector data))
-  (let ((length (length data)))
-    (write-frame stream length +data-frame+ keys
-                 (lambda (buffer start data)
-                   (account-write-window-contribution (get-connection stream)
-                                                      stream length)
-                   (replace buffer data :start1 start))
-                 data)))
+  (write-frame stream length +data-frame+ keys
+               (lambda (buffer frame-start data)
+                 (account-write-window-contribution (get-connection stream)
+                                                    stream length)
+                 (replace buffer data :start1 frame-start :start2 start))
+               data))
+
+(defun write-data-frame-region (stream data start length &rest keys &key padded end-stream)
+  "```
+  +---------------+-----------------------------------------------+
+  |                            Data (*)                         ...
+  +---------------------------------------------------------------+
+```
+
+  DATA frames (type=0x0) convey arbitrary, variable-length sequences of
+  octets associated with a stream.  One or more DATA frames are used,
+  for instance, to carry HTTP request or response payloads."
+  (declare (ignore padded end-stream)
+           (octet-vector data))
+  (write-frame stream length +data-frame+ keys
+               (lambda (buffer frame-start data)
+                 (account-write-window-contribution (get-connection stream)
+                                                    stream length)
+                 (replace buffer data :start1 frame-start :start2 start))
+               data))
 
 (defun write-data-frame-multi (stream data &rest keys &key end-stream)
   "Write a data frame that includes DATA - that is a sequence of octet vectors."
