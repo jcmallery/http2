@@ -62,8 +62,8 @@
 - Opaque pointer to the openssl handle (SSL). See SSL-READ and ENCRYPT-SOME.
 - Input and output BIO for exchanging data with OPENSSL (WBIO, RBIO)."
   (ssl (null-pointer) :type cffi:foreign-pointer :read-only nil) ; mostly RO, but invalidated afterwards
-  (rbio (bio-new (bio-s-mem)) :type cffi:foreign-pointer :read-only t)
-  (wbio (bio-new (bio-s-mem)) :type cffi:foreign-pointer :read-only t))
+  (rbio (bio-new (bio-s-mem)) :type cffi:foreign-pointer)
+  (wbio (bio-new (bio-s-mem)) :type cffi:foreign-pointer))
 
 (defmethod describe-object ((object tls-endpoint-core) stream)
   (let ((*print-length* (or *print-length* 30)))
@@ -109,13 +109,12 @@ This is factored out so that it can be used in structures that inherit TLS-CORE.
        (close-openssl ,name))))
 
 (defun close-openssl (client)
-  "Close the endpoint core CLIENT at drop the references."
+  "Close the endpoint core CLIENT and drop the references."
   (unless (null-pointer-p (tls-endpoint-core-ssl client))
     (ssl-free (tls-endpoint-core-ssl client)))   ; BIOs are closed automatically
-  (setf (tls-endpoint-core-ssl client) (null-pointer))
-  ;; we set these as read-only, so do not touch
-  #+nil (tls-endpoint-core-rbio ,name) (null-pointer)
-  #+nil (tls-endpoint-core-wbio ,name) (null-pointer))
+  (setf (tls-endpoint-core-ssl client) (null-pointer)
+        (tls-endpoint-core-rbio client) (null-pointer)
+        (tls-endpoint-core-wbio client) (null-pointer)))
 
 (defsection @openssl-context (:title "TLS context")
   "TLS context is created with MAKE-HTTP2-TLS-CONTEXT, and its use should be
