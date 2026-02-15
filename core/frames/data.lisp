@@ -139,8 +139,7 @@ Special cases:
 - Buffer is full -> extend it
 - Buffer contains more that max peer frame size octets -> send the data out "
   (with-buffer-slots stream
-    (when (= (fill-pointer output-buffer)) (array-dimension output-buffer 0)
-          (adjust-array output-buffer (* 2 (array-dimension output-buffer 0))))
+    (maybe-grow-buffer output-buffer (fill-pointer output-buffer))
     (vector-push byte output-buffer)
     (when (>= (fill-pointer output-buffer)
               (get-max-peer-frame-size connection))
@@ -154,9 +153,7 @@ Special cases:
   (with-buffer-slots stream
     (let* ((old-fill (fill-pointer output-buffer))
            (new-fill (+ (- end start) old-fill)))
-      (when (>= new-fill (array-dimension output-buffer 0))
-        (adjust-array output-buffer (min new-fill
-                                         (* 2 (array-dimension output-buffer 0)))))
+      (maybe-grow-buffer output-buffer new-fill)
       (setf (fill-pointer output-buffer) new-fill)
       (replace output-buffer sequence :start1 old-fill :start2 start
                                       :end2 end))
