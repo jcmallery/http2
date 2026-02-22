@@ -12,7 +12,8 @@ See manual page for SSL_get_error for the overview."
   (communication-error condition)
   (ssl-blocked condition)
   (ssl-wants-read condition)
-  (ssl-wants-write condition))
+  (ssl-wants-write condition)
+  (simple-communication-error condition))
 
 (define-condition ssl-error-condition (communication-error)
   ((codes :accessor get-codes :initarg :codes))
@@ -106,7 +107,17 @@ nothing was added to the error stack, and errno was 0."))
   (:documentation "ssl-get-error return code that we do not handle (yet)"))
 
 (defun handle-ssl-errors* (client ret)
-  "Check RET value of a openssl call and raise relevant error, if any."
+  "Raise appropriate error after a failed openssl call.
+
+Raises one of SIMPLE-COMMUNICATION-ERROR, SSL-WANTS-WRITE, SSL-WANTS-READ,
+PEER-SENT-CLOSE-NOTIFY, SSL-ERROR-CONDITION, SSL-SYSCALL-ERROR, or
+OTHER-SSL-ERROR.
+
+If ret>0 (no fail), returns nil."
+  ;; after SSL_connect(), SSL_accept(),SSL_do_handshake(), SSL_read_ex(),
+  ;; SSL_read(), SSL_peek_ex(),SSL_peek(), SSL_shutdown(), SSL_write_ex() or
+  ;; SSL_write()
+
   (let* ((ssl (tls-endpoint-core-ssl client))
          (wbio (tls-endpoint-core-rbio client))
          (err-code (ssl-get-error ssl ret)))

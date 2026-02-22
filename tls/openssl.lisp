@@ -5,11 +5,18 @@
   (t (:default "libssl.3")))
 
 (defsection @openssl (:title "Openssl interface")
-  "Wraps openssl calls."
-  (@openssl-endpoint section)
-  (@openssl-context section))
+  "Wrapper library over openssl functions.
 
-(export '(handle-ssl-errors* with-ssl-context encrypt-some* bio-should-retry))
+@OPENSSL-ENDPOINT wraps the SSL parameter used in openssl functions.
+
+@OPENSSL-CONTEXT wraps the CTX parameter used in openssl functions"
+  (handle-ssl-errors* function)
+  (encrypt-some* function)
+  (bio-should-retry function)
+  (with-ssl-context macro)
+  (@openssl-endpoint section)
+  (@openssl-context section)
+  (@ssl-errors section))
 
 (export '(neg-bio-needs-read peer-open has-data-to-encrypt can-write-ssl
           can-read-bio
@@ -19,11 +26,11 @@
           bio-read% ssl-is-init-finished ssl-accept ssl-connect))
 
 (defsection @openssl-endpoint (:title "TLS endpoint")
+  "Wrap the SSL parameter used in openssl functions."
   (tls-endpoint-core type)
   (init-tls-endpoint-core function)
   (make-tls-endpoint-core function)
   (with-tls-endpoint-core macro)
-
   (close-openssl function))
 
 (use-foreign-library openssl)
@@ -78,7 +85,7 @@
             (when (plusp (ssl-is-init-finished (tls-endpoint-core-ssl object))) "" #+nil (ssl-peek object 100)))))
 
 (defun init-tls-endpoint-core (client context)
-  "Initialize freshly created TLS-CORE.
+  "Initialize existing freshly created TLS-CORE.
 
 That is, create a SSL context and bind it with RBIO and WBIO.
 
@@ -88,7 +95,7 @@ This is factored out so that it can be used in structures that inherit TLS-CORE.
     (setf (tls-endpoint-core-ssl client) ssl)))
 
 (defun make-tls-endpoint-core (context)
-  "New TLS-ENDPOINT-CORE that has context derived from CONTEXT."
+  "Make a new TLS-ENDPOINT-CORE that has context derived from CONTEXT."
   (let ((ep (make-tls-endpoint-core%)))
     (init-tls-endpoint-core ep context)
     ep))
@@ -250,7 +257,8 @@ We should also limit allowed ciphers, but we do not.")
                             (function make-http2-tls-context :replacement make-tls-context)))
 
 (defmacro with-ssl-context ((ctx dispatcher) &body body)
-  "Run body with SSL context created by MAKE-TLS-CONTEXT in CTX."
+  "Run body with SSL context created by MAKE-TLS-CONTEXT in CTX. Free the context
+when leaving the BODY."
   (check-type ctx symbol)
   `(let ((,ctx (make-tls-context ,dispatcher)))
      (unwind-protect
