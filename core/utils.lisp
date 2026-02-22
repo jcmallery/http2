@@ -367,3 +367,9 @@ reading)."))
       (print-unreadable-object (err out :type t)
         (format out "on ~a" (http2/utils:get-medium err)))
       (call-next-method)))
+
+(defsection @log-basics ()
+  (*log-stream* variable))
+
+(defvar *log-stream* (make-synonym-stream '*standard-output*)
+  "The stream used for generic logging. ")
