@@ -1,7 +1,15 @@
 (in-package #:http2/openssl)
 
 (defsection @SSL (:title "SSL handling")
-            (communication-error condition)
+  "Wrapper library over openssl functions.
+
+@OPENSSL-ENDPOINT wraps the SSL parameter used in openssl functions.
+
+@OPENSSL-CONTEXT wraps the CTX parameter used in openssl functions"
+  (bio-should-retry function)
+  (@openssl-endpoint section)
+  (@openssl-context section)
+  (@ssl-ops section)
   (@ssl-errors section))
 
 (defsection @SSL-errors (:title "Signalled errors")
@@ -9,11 +17,16 @@
 conditions. They are descended from the COMMUNICATION-ERROR.
 
 See manual page for SSL_get_error for the overview."
+  (handle-ssl-errors* function)
   (communication-error condition)
+  (simple-communication-error condition)
   (ssl-blocked condition)
   (ssl-wants-read condition)
   (ssl-wants-write condition)
-  (simple-communication-error condition))
+  (peer-sent-close-notify condition)
+  (ssl-error-condition condition)
+  (ssl-syscall-error condition)
+  (other-ssl-error condition))
 
 (define-condition ssl-error-condition (communication-error)
   ((codes :accessor get-codes :initarg :codes))
@@ -145,6 +158,9 @@ If ret>0 (no fail), returns nil."
              (error 'unexpected-eof :medium client)
              (error 'ssl-syscall-error :codes (get-ssl-errors) :errno errno :medium client))))
       (t (error 'other-ssl-error :code err-code :medium client)))))
+
+(defsection @ssl-ops ()
+  (encrypt-some* function))
 
 (defun encrypt-some* (client vector from to)
   "Encrypt octets in VECTOR between FROM and TO. Return number of octets

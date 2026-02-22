@@ -4,20 +4,6 @@
   #-os-macosx (:unix "libssl.so")
   (t (:default "libssl.3")))
 
-(defsection @openssl (:title "Openssl interface")
-  "Wrapper library over openssl functions.
-
-@OPENSSL-ENDPOINT wraps the SSL parameter used in openssl functions.
-
-@OPENSSL-CONTEXT wraps the CTX parameter used in openssl functions"
-  (handle-ssl-errors* function)
-  (encrypt-some* function)
-  (bio-should-retry function)
-  (with-ssl-context macro)
-  (@openssl-endpoint section)
-  (@openssl-context section)
-  (@ssl-errors section))
-
 (export '(neg-bio-needs-read peer-open has-data-to-encrypt can-write-ssl
           can-read-bio
           ; bio-s-mem bio-new ssl-new
@@ -126,6 +112,7 @@ This is factored out so that it can be used in structures that inherit TLS-CORE.
 (defsection @openssl-context (:title "TLS context")
   "TLS context is created with MAKE-HTTP2-TLS-CONTEXT, and its use should be
 wrapped in WITH-SSL-CONTEXT."
+  (with-ssl-context macro)
   (with-ssl-context mgl-pax:macro)
   (make-tls-context generic-function)
   "The details of the context are modified by the context mixins.")
