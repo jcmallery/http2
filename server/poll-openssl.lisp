@@ -17,7 +17,7 @@
 conditions. They are descended from the COMMUNICATION-ERROR.
 
 See manual page for SSL_get_error for the overview."
-  (handle-ssl-errors* function)
+  (handle-ssl-errors function)
   (communication-error condition)
   (simple-communication-error condition)
   (ssl-blocked condition)
@@ -158,6 +158,19 @@ If ret>0 (no fail), returns nil."
              (error 'unexpected-eof :medium client)
              (error 'ssl-syscall-error :codes (get-ssl-errors) :errno errno :medium client))))
       (t (error 'other-ssl-error :code err-code :medium client)))))
+
+(defun handle-ssl-errors (client ret)
+  "Check real error after a call to SSL_connect, SSL_accept,
+SSL_do_handshake, SSL_read_ex, SSL_read, SSL_peek_ex, SSL_peek, SSL_shutdown,
+SSL_write_ex or SSL_write.
+
+If the operation was successfully completed, do nothing.
+
+If it is a harmless one (want read or want write), try to process the data.
+
+Raise error otherwise."
+  (handler-case (handle-ssl-errors* client ret)
+    (ssl-wants-read () (remove-state client 'neg-bio-needs-read))))
 
 (defsection @ssl-ops ()
   (encrypt-some* function))

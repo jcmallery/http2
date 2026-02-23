@@ -4,21 +4,6 @@
   #-os-macosx (:unix "libssl.so")
   (t (:default "libssl.3")))
 
-(export '(neg-bio-needs-read peer-open has-data-to-encrypt can-write-ssl
-          can-read-bio
-          ; bio-s-mem bio-new ssl-new
-          ssl-set-accept-state
-          bio-write ssl-read% ssl-error-condition err-reason-error-string
-          bio-read% ssl-is-init-finished ssl-accept ssl-connect))
-
-(defsection @openssl-endpoint (:title "TLS endpoint")
-  "Wrap the SSL parameter used in openssl functions."
-  (tls-endpoint-core type)
-  (init-tls-endpoint-core function)
-  (make-tls-endpoint-core function)
-  (with-tls-endpoint-core macro)
-  (close-openssl function))
-
 (use-foreign-library openssl)
 
 (defcfun "BIO_new" :pointer (bio-method :pointer))
@@ -43,20 +28,33 @@
 (defcfun "SSL_set_bio" :void (ssl :pointer) (rbio :pointer) (wbio :pointer))
 (defcfun "SSL_write" :int (ssl :pointer) (buffer :pointer) (bufsize :int))
 
-(defstruct (tls-endpoint-core (:constructor make-tls-endpoint-core%)
-                              (:print-object
+
+(defsection @openssl-endpoint (:title "TLS endpoint")
+  "Wrap the SSL parameter used in openssl functions."
+  (tls-endpoint-core type)
+  (init-tls-endpoint-core function)
+  (make-tls-endpoint-core function)
+  (with-tls-endpoint-core macro)
+  (close-openssl function))
+
+(locally
+    (declare (special *initial-state*))
+  (defstruct (tls-endpoint-core (:constructor make-tls-endpoint-core%)
+                                (:print-object
                                  (lambda (object out)
                                    (format out
                                            (if (null-pointer-p (tls-endpoint-core-ssl object))
                                                "#<uninitialized or freed tls-core>"
                                                "#<tls-core>")))))
-  "Data of one TLS endpoint. This includes:
+    "Data of one TLS endpoint. This includes:
 
 - Opaque pointer to the openssl handle (SSL). See SSL-READ and ENCRYPT-SOME.
-- Input and output BIO for exchanging data with OPENSSL (WBIO, RBIO)."
-  (ssl (null-pointer) :type cffi:foreign-pointer :read-only nil) ; mostly RO, but invalidated afterwards
-  (rbio (bio-new (bio-s-mem)) :type cffi:foreign-pointer)
-  (wbio (bio-new (bio-s-mem)) :type cffi:foreign-pointer))
+- Input and output BIO for exchanging data with OPENSSL (WBIO, RBIO).
+- State flags."
+    (ssl (null-pointer) :type cffi:foreign-pointer :read-only nil) ; mostly RO, but invalidated afterwards
+    (rbio (bio-new (bio-s-mem)) :type cffi:foreign-pointer)
+    (wbio (bio-new (bio-s-mem)) :type cffi:foreign-pointer)
+    (state *initial-state* :type (unsigned-byte 16))))
 
 (defmethod describe-object ((object tls-endpoint-core) stream)
   (let ((*print-length* (or *print-length* 30)))
@@ -108,6 +106,104 @@ This is factored out so that it can be used in structures that inherit TLS-CORE.
   (setf (tls-endpoint-core-ssl client) (null-pointer)
         (tls-endpoint-core-rbio client) (null-pointer)
         (tls-endpoint-core-wbio client) (null-pointer)))
+
+(defsection @poll-tls-states (:title "TLS endpoint states")
+  "The actions available for a specific endpoint are kept in STATE.
+
+Each state bit corresponds to one function that can be called."
+  "CAN-READ-PORT is set when there are data available on the input port. This can
+be set by HANDLE-CLIENT-IO after poll, and is cleared by READ-FROM-PEER when there are
+no longer data available. It allows PROCESS-DATA-ON-SOCKET to be called."
+  "CAN-READ-SSL is set when there are data available on SSL to read by the
+application. It is set by PROCESS-DATA-ON-SOCKET, as it indicates that some data
+to decrypt were written, and is cleared by SSL-READ. It triggers
+ON-COMPLETE-SSL-DATA or RUN-USER-CALLBACK."
+  "CAN-WRITE-SSL is set when data can be written to SSL. It is set by
+PROCESS-DATA-ON-SOCKET and cleared by ENCRYPT-SOME. Triggers ENCRYPT-DATA."
+  "CAN-READ-BIO is set when there are probably some data to read from the BIO. It
+is set by ENCRYPT-SOME and PROCESS-DATA-ON-SOCKET and MAYBE-INIT-SSL. It is
+cleared by READ-ENCRYPTED-FROM-OPENSSL.  It triggets MOVE-ENCRYPTED-BYTES."
+  "CAN-WRITE is set when writing to the output socket is possible (which usually
+is). It is set by HANDLE-CLIENT-IO and . It is cleared by SEND-TO-PEER and
+WRITE-DATA-TO-SOCKET. It triggers WRITE-DATA-TO-SOCKET."
+  "HAS-DATA-TO-WRITE is set when the write buffer for output socket is
+non-empty (or, not implemented, has enough data to make sending economical). It
+is set by READ-ENCRYPTED-FROM-OPENSSL and MOVE-ENCRYPTED-BYTES. It is cleared by
+WRITE-DATA-TO-SOCKET and triggers MOVE-ENCRYPTED-BYTES."
+  "NEG-BIO-NEEDS-READ is set by PROCESS-DATA-ON-SOCKET and triggers
+MAYBE-INIT-SSL. It is cleared by an error condition in HANDLE-SSL-ERRORS."
+  "SSL-INIT-NEEDED is maybe not needed?"
+  (state type)
+
+  (select-next-action function)
+  (states-to-string function))
+
+(export '(neg-bio-needs-read peer-open has-data-to-encrypt can-write-ssl
+          can-read-bio
+          ; bio-s-mem bio-new ssl-new
+          ssl-set-accept-state
+          bio-write ssl-read% ssl-error-condition err-reason-error-string
+          bio-read% ssl-is-init-finished ssl-accept ssl-connect))
+
+;;;; Async TLS endpoint state
+(eval-when (:load-toplevel :compile-toplevel)
+  (defparameter *states*
+    '(CAN-READ-PORT                     ; ①
+      CAN-READ-SSL                      ; ③
+      CAN-WRITE-SSL                     ; ④
+      CAN-READ-BIO                      ; ⑤
+      CAN-WRITE                         ; ⑥
+      HAS-DATA-TO-WRITE                 ; ⓤ
+      NEG-BIO-NEEDS-READ                ; B
+      SSL-INIT-NEEDED                   ; S
+      )
+    "List of state bits that can a TLS endpoint have."))
+
+(defun states-to-string (state)
+  "Short string describing the state using codes on the diagram."
+  (with-output-to-string (*standard-output*)
+    (loop ;for state in *states*
+          for state-idx from 0
+          for label across "①③④⑤⑥ⓤⒺBSO"
+          do (princ
+              (if (plusp (ldb (byte 1 state-idx) state)) label #\Space)))))
+
+(deftype state ()
+  "Description of actions available to the endpoint."
+  `(unsigned-byte ,(length *states*)))
+
+(defmacro state-idx (state)
+  `(let ((idx (position ,state ',*states*)))
+     (or idx (error "No state ~a" ,state))))
+
+(defun if-state* (client state-idx)
+  (plusp (ldb (byte 1 state-idx)
+              (tls-endpoint-core-state client))))
+
+(declaim (inline if-state add-state remove-state if-state* test-state*))
+
+(defun if-state (client state)
+  (if-state* client (state-idx state)))
+
+(defun set-state* (client idx value)
+  (declare (bit value)
+           (fixnum  idx))
+  (setf (ldb (byte 1 idx)
+             (tls-endpoint-core-state client))
+        value))
+
+(defun add-state (client state)
+  (set-state* client (state-idx state) 1))
+
+(defun remove-state (client state)
+  (set-state* client (state-idx state) 0))
+
+(defparameter *initial-state*
+  (loop with state = 0
+        for item in
+        '(CAN-WRITE CAN-WRITE-SSL ssl-init-needed)
+        do (setf (ldb (byte 1 (state-idx item)) state) 1)
+        finally (return state)))
 
 (defsection @openssl-context (:title "TLS context")
   "TLS context is created with MAKE-HTTP2-TLS-CONTEXT, and its use should be
