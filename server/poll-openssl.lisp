@@ -20,9 +20,6 @@ See manual page for SSL_get_error for the overview."
   (handle-ssl-errors function)
   (communication-error condition)
   (simple-communication-error condition)
-  (ssl-blocked condition)
-  (ssl-wants-read condition)
-  (ssl-wants-write condition)
   (peer-sent-close-notify condition)
   (ssl-error-condition condition)
   (ssl-syscall-error condition)
@@ -88,23 +85,6 @@ indicate that the underlying transport has been closed.")
   ;; To test: run a curl request
   (:report "Peer closed TLS connection."))
 
-(define-condition ssl-blocked (communication-error)
-  ()
-  (:documentation "The operation did not complete and can be retried later."))
-
-(define-condition ssl-wants-read (ssl-blocked)
-  ()
-  (:documentation
-   "The last operation was a read operation from a nonblocking BIO. Not enough data
-was available at this time to complete the operation.  If at a later time the
-underlying BIO has data available for reading the same function can be called
-again.")
-  (:report "Not enough data for SSL read. Waiting for more data normally fixes this"))
-
-(define-condition ssl-wants-write (ssl-blocked)
-  ()
-  (:documentation  ""))
-
 (define-condition retry-flag-not-set (communication-error)
   ()
   (:documentation "Openss "))
@@ -119,14 +99,21 @@ nothing was added to the error stack, and errno was 0."))
   ((code :accessor get-code :initarg :code))
   (:documentation "ssl-get-error return code that we do not handle (yet)"))
 
-(defun handle-ssl-errors* (client ret)
+(defun bio-should-retry (wbio client)
+  (when (zerop (bio-test-flags wbio bio-flags-should-retry))
+    (error 'simple-communication-error :format-control "Retry flag should be set."
+                                       :medium client)))
+
+(defun handle-ssl-errors* (client ret on-read-fail-idx on-write-fail-idx)
   "Raise appropriate error after a failed openssl call.
 
-Raises one of SIMPLE-COMMUNICATION-ERROR, SSL-WANTS-WRITE, SSL-WANTS-READ,
-PEER-SENT-CLOSE-NOTIFY, SSL-ERROR-CONDITION, SSL-SYSCALL-ERROR, or
-OTHER-SSL-ERROR.
+If ret>0 (no fail), returns nil. If write or read is needed by SSL, return nil
+as well and clear appropriate flag.
 
-If ret>0 (no fail), returns nil."
+Otherwise raise one of SIMPLE-COMMUNICATION-ERROR, PEER-SENT-CLOSE-NOTIFY,
+SSL-ERROR-CONDITION, SSL-SYSCALL-ERROR, or OTHER-SSL-ERROR.
+
+"
   ;; after SSL_connect(), SSL_accept(),SSL_do_handshake(), SSL_read_ex(),
   ;; SSL_read(), SSL_peek_ex(),SSL_peek(), SSL_shutdown(), SSL_write_ex() or
   ;; SSL_write()
@@ -137,19 +124,14 @@ If ret>0 (no fail), returns nil."
     (cond
       ;; after ssl read
       ((= err-code ssl-error-want-write)
-       (when (zerop (bio-test-flags wbio bio-flags-should-retry))
-         (error 'simple-communication-error :format-control "Retry flag should be set."
-                                            :medium client))
-
-       (error 'ssl-wants-write :medium client))
+       (bio-should-retry wbio client)
+       (set-state* client on-write-fail-idx 0))
       ((= err-code ssl-error-want-read)
        ;; This is relevant for accept call and handled in loop
        ;; may be needed for pull phase
        ;; is this needed?
-       (when (zerop (bio-test-flags wbio bio-flags-should-retry))
-         (error 'simple-communication-error :format-control "Retry flag should be set."
-                                            :medium client))
-       (error 'ssl-wants-read))
+       (bio-should-retry wbio client)
+       (set-state* client on-read-fail-idx 0))
       ((= err-code ssl-error-none) nil) ; this should happen iff ret > 0
       ((= err-code ssl-error-zero-return) (error 'peer-sent-close-notify :medium client))
       ((= err-code ssl-error-ssl) (error 'ssl-error-condition :medium client :codes (get-ssl-errors)))
@@ -170,8 +152,7 @@ If the operation was successfully completed, do nothing.
 If it is a harmless one (want read or want write), try to process the data.
 
 Raise error otherwise."
-  (handler-case (handle-ssl-errors* client ret)
-    (ssl-wants-read () (remove-state client 'neg-bio-needs-read))))
+  (handle-ssl-errors* client ret (state-idx 'neg-bio-needs-read) nil)) ; FIXME: write status
 
 
 (defsection @ssl-ops ()
@@ -186,37 +167,31 @@ Raise error otherwise."
 ; TODO: rename to encrypt-vector
 (defun encrypt-some* (client vector from to)
   "Encrypt octets in VECTOR between FROM and TO. Return number of octets
-processed, or raise appropriate error. You can read the encrypted octets later
-by READ-ENCRYPTED-FROM-OPENSSL*."
+processed, or raise appropriate error. You can try to read the encrypted octets
+later by READ-ENCRYPTED-FROM-OPENSSL*."
+  (declare (type (integer 0 #.array-dimension-limit) from to))
   (with-pointer-to-vector-data (buffer vector)
-    (handler-case
-        (let* ((ssl (tls-endpoint-core-ssl client))
-               (res (ssl-write ssl (inc-pointer buffer from) (- to from))))
-          (cond
-            ((plusp res)
-             (add-state client 'can-read-bio)
-             res)
-            ;; no-star handle-ssl-errors masks SSL-WANTS-READ
-            (t (handle-ssl-errors* client res)
-               0)))
-      (ssl-blocked ()
-        ;; CAN-WRITE-SSL is not same as NEG-BIO-NEEDS-READ
-        (remove-state client 'can-write-ssl)))))
-
-(defun bio-should-retry (wbio)
-  (bio-test-flags wbio bio-flags-should-retry))
+    (let* ((ssl (tls-endpoint-core-ssl client))
+           (res (ssl-write ssl (inc-pointer buffer from) (- to from))))
+      (cond
+        ((plusp res)
+         (add-state client 'can-read-bio)
+         res)
+        ;; no-star handle-ssl-errors masks SSL-WANTS-READ
+        (t (handle-ssl-errors* client res (state-idx 'can-write-ssl) nil)
+           0)))))
 
 (defun read-encrypted-from-openssl* (client vec size)
   (declare ((simple-array (unsigned-byte 8)) vec)
            (fixnum size))
   (with-pointer-to-vector-data (buffer vec)
-    (let ((res (bio-read% (tls-endpoint-core-wbio client) buffer size)))
+    (let* ((wbio (tls-endpoint-core-wbio client))
+           (res (bio-read% wbio buffer size)))
       (cond ((plusp res)
              (add-state client 'has-data-to-write)
              res)
-            ((zerop (bio-should-retry (tls-endpoint-core-wbio client)))
-             (error "Failed to read from bio, and cant retry"))
             (t
+             (bio-should-retry wbio client)
              (remove-state client 'can-read-bio)
              0)))))
 
@@ -260,6 +235,6 @@ Return 0 when no data are available."
     (let* ((vec (make-octet-buffer max-size))
            (res
              (with-pointer-to-vector-data (buffer vec)
-               (http2/openssl::ssl-peek% (tls-endpoint-core-ssl client) buffer max-size))))
+               (ssl-peek% (tls-endpoint-core-ssl client) buffer max-size))))
       (handle-ssl-errors client res)
       (values (subseq vec 0 (max 0 res)) res))))
