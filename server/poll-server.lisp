@@ -124,7 +124,6 @@ The actions are in general indicated by arrows in the diagram:
   (octets-needed 0 :type fixnum)
   (encrypt-buf-size 0 :type fixnum)
   (start-time (get-internal-real-time) :type fixnum)
-;  (state *initial-state* :type state)
   ;; set of CAN-READ-PORT, CAN-READ-SSL, CAN-WRITE-SSL,
   ;; CAN-READ-BIO, HAS-DATA-TO-WRITE, CAN-WRITE
   ;; NEG-BIO-NEEDS-READ SSL-INIT-NEEDED
@@ -226,18 +225,8 @@ available. Raise an error on error." vector destination)
       (remove-state client 'CAN-READ-PORT))
     read))
 
-;;;; Read BIO (rbio)
-
-;;; This name is somewhat confusing - it is BIO for SSL reads, so it actually
-;;; gets written to.
-
 (define-writer write-octets-to-decrypt openssl-to-decrypt (client vector from to)
-  (with-pointer-to-vector-data (buffer vector)
-    (let ((written (bio-write (client-rbio client)
-                              (inc-pointer buffer from)
-                              (- to from))))
-      (unless (plusp written) (error "Bio-write failed"))
-      written)))
+  (write-octets-to-decrypt* client vector from to))
 
 (defun decrypt-socket-octets (client vector from to)
   "Send data in the VECTOR between FROM and TO to the ② openssl for decryption ."
@@ -253,31 +242,6 @@ available. Raise an error on error." vector destination)
   (unless (if-state client 'neg-bio-needs-read)
     (add-state client 'neg-BIO-NEEDS-READ)
     (add-state client 'CAN-READ-BIO)))
-
-;;;; Read SSL
-(defun ssl-read (client vec size)
-   "Move up to SIZE octets from the decrypted SSL ③ to the VEC.
-
-Return 0 when no data are available. Possibly remove CAN-READ-SSL and/or
-NEG-BIO-NEEDS-READ flags."
-   (let ((res
-          (with-pointer-to-vector-data (buffer vec)
-            (ssl-read% (client-ssl client) buffer size))))
-     (handle-ssl-errors client res)
-     (unless (= res size) (remove-state client 'can-read-ssl))
-     (max 0 res)))
-
-(defun ssl-peek (client max-size)
-   "Move up to SIZE octets from the decrypted SSL ③ to the VEC.
-
-Return 0 when no data are available."
-  (unless (null-pointer-p (client-ssl client))
-    (let* ((vec (make-octet-buffer max-size))
-           (res
-             (with-pointer-to-vector-data (buffer vec)
-               (http2/openssl::ssl-peek% (client-ssl client) buffer max-size))))
-      (handle-ssl-errors client res)
-      (values (subseq vec 0 (max 0 res)) res))))
 
 ;;;; Encrypt queue
 (defun add-and-maybe-pass-data (client buffer new-data from to old-size cleaner)
@@ -332,16 +296,8 @@ NEW-DATA are completely used up (can be dynamic-extent)."
     (setf (client-encrypt-buf-size client) new-size)
     (assert (= processed (length new-data)))))
 
-;;;; Write to SSL
 (define-writer encrypt-some output-ssl (client vector from to)
-  (handler-case
-      (let ((res
-              (encrypt-some* client vector from to)))
-        (when (plusp res)
-          (add-state client 'can-read-bio))
-        res)
-    (ssl-blocked ()
-      (remove-state client 'can-write-ssl))))
+  (encrypt-some* client vector from to))
 
 (defun encrypt-data (client)
   "Encrypt data in client's ENCRYPT-BUF.
@@ -358,18 +314,7 @@ Otherwise, use a temporary vector to write data "
 
 ;;;; Write BIO
 (define-reader read-encrypted-from-openssl bio-out (client vec size)
-  (declare ((simple-array (unsigned-byte 8)) vec)
-           (fixnum size))
-  (with-pointer-to-vector-data (buffer vec)
-    (let ((res (bio-read% (client-wbio client) buffer size)))
-      (cond ((plusp res)
-             (add-state client 'has-data-to-write)
-             res)
-            ((zerop (bio-should-retry  (client-wbio client)))
-             (error "Failed to read from bio, and cant retry"))
-            (t
-             (remove-state client 'can-read-bio)
-             0)))))
+  (read-encrypted-from-openssl* client vec size))
 
 (defun move-encrypted-bytes (client)
   "Move data encrypted by OpenSSL to the socket write queue Ⓔ.
@@ -540,14 +485,6 @@ Repeat on partial write."
               (funcall next-fn client written))
              ((zerop written)
               (return from))))))
-
-(defun maybe-init-ssl (client)
-  "If SSL is not initialized yet, initialize it."
-  (cond
-    ((zerop (ssl-is-init-finished (client-ssl client)))
-     (handle-ssl-errors client (ssl-accept (client-ssl client))))
-    (t (remove-state client 'ssl-init-needed)
-       (add-state client 'can-read-bio))))
 
 (defun doubled-buffer (buffer)
   "Return a larger buffer with same initial data as the provided one."

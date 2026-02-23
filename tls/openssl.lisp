@@ -133,15 +133,18 @@ WRITE-DATA-TO-SOCKET and triggers MOVE-ENCRYPTED-BYTES."
   "NEG-BIO-NEEDS-READ is set by PROCESS-DATA-ON-SOCKET and triggers
 MAYBE-INIT-SSL. It is cleared by an error condition in HANDLE-SSL-ERRORS."
   "SSL-INIT-NEEDED is maybe not needed?"
-  (state type)
-
+  (openssl-state type)
+  (*states* variable)
+  (if-state function)
+  (add-state function)
+  (remove-state function)
   (select-next-action function)
   (states-to-string function))
 
 (export '(neg-bio-needs-read peer-open has-data-to-encrypt can-write-ssl
-          can-read-bio
+          can-read-bio can-read-port can-read-ssl ssl-init-needed
           ; bio-s-mem bio-new ssl-new
-          ssl-set-accept-state
+          ssl-set-accept-state can-write has-data-to-write
           bio-write ssl-read% ssl-error-condition err-reason-error-string
           bio-read% ssl-is-init-finished ssl-accept ssl-connect))
 
@@ -159,16 +162,18 @@ MAYBE-INIT-SSL. It is cleared by an error condition in HANDLE-SSL-ERRORS."
       )
     "List of state bits that can a TLS endpoint have."))
 
+(export *states*)
+
 (defun states-to-string (state)
   "Short string describing the state using codes on the diagram."
   (with-output-to-string (*standard-output*)
-    (loop ;for state in *states*
-          for state-idx from 0
-          for label across "①③④⑤⑥ⓤⒺBSO"
-          do (princ
-              (if (plusp (ldb (byte 1 state-idx) state)) label #\Space)))))
+    (loop                               ;for state in *states*
+                                        for state-idx from 0
+                                        for label across "①③④⑤⑥ⓤⒺBSO"
+                                        do (princ
+                                            (if (plusp (ldb (byte 1 state-idx) state)) label #\Space)))))
 
-(deftype state ()
+(deftype openssl-state ()
   "Description of actions available to the endpoint."
   `(unsigned-byte ,(length *states*)))
 
@@ -176,11 +181,11 @@ MAYBE-INIT-SSL. It is cleared by an error condition in HANDLE-SSL-ERRORS."
   `(let ((idx (position ,state ',*states*)))
      (or idx (error "No state ~a" ,state))))
 
+(declaim (inline if-state add-state remove-state if-state* test-state*))
+
 (defun if-state* (client state-idx)
   (plusp (ldb (byte 1 state-idx)
               (tls-endpoint-core-state client))))
-
-(declaim (inline if-state add-state remove-state if-state* test-state*))
 
 (defun if-state (client state)
   (if-state* client (state-idx state)))
@@ -205,6 +210,7 @@ MAYBE-INIT-SSL. It is cleared by an error condition in HANDLE-SSL-ERRORS."
         do (setf (ldb (byte 1 (state-idx item)) state) 1)
         finally (return state)))
 
+
 (defsection @openssl-context (:title "TLS context")
   "TLS context is created with MAKE-HTTP2-TLS-CONTEXT, and its use should be
 wrapped in WITH-SSL-CONTEXT."
@@ -253,7 +259,7 @@ wrapped in WITH-SSL-CONTEXT."
   (clientlen :int))
 
 (cffi:defcallback select-h2-callback
-    :int
+   :int
     ((ssl :pointer)
      (out (:pointer (:pointer :char)))
      (outlen (:pointer :char))

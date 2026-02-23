@@ -172,19 +172,88 @@ Raise error otherwise."
   (handler-case (handle-ssl-errors* client ret)
     (ssl-wants-read () (remove-state client 'neg-bio-needs-read))))
 
+
 (defsection @ssl-ops ()
-  (encrypt-some* function))
+  "Use ENCRYPT-SOME* and SSL-READ"
+  (encrypt-some* function)
+  (read-encrypted-from-openssl* function)
+  (write-octets-to-decrypt* function)
+  (ssl-read function)
+  (maybe-init-ssl function)
+  (ssl-peek function))
 
 (defun encrypt-some* (client vector from to)
   "Encrypt octets in VECTOR between FROM and TO. Return number of octets
-processed, or raise appropriate error."
+processed, or raise appropriate error. You can read the encrypted octets later by READ-ENCRYPTED-FROM-OPENSSL*."
   (with-pointer-to-vector-data (buffer vector)
-    (let* ((ssl (tls-endpoint-core-ssl client))
-           (res (ssl-write ssl (inc-pointer buffer from) (- to from))))
-      (cond
-        ((plusp res) res)
-        (t (handle-ssl-errors* client res)
-           0)))))
+  (handler-case
+      (let* ((ssl (tls-endpoint-core-ssl client))
+             (res (ssl-write ssl (inc-pointer buffer from) (- to from))))
+        (cond
+          ((plusp res)
+           (add-state client 'can-read-bio)
+           res)
+          ;; no-star handle-ssl-errors masks SSL-WANTS-READ
+          (t (handle-ssl-errors* client res)
+             0)))
+    (ssl-blocked ()
+      (remove-state client 'can-write-ssl)))))
 
 (defun bio-should-retry (wbio)
   (bio-test-flags wbio bio-flags-should-retry))
+
+(defun read-encrypted-from-openssl* (client vec size)
+  (declare ((simple-array (unsigned-byte 8)) vec)
+           (fixnum size))
+  (with-pointer-to-vector-data (buffer vec)
+    (let ((res (bio-read% (tls-endpoint-core-wbio client) buffer size)))
+      (cond ((plusp res)
+             (add-state client 'has-data-to-write)
+             res)
+            ((zerop (bio-should-retry (tls-endpoint-core-wbio client)))
+             (error "Failed to read from bio, and cant retry"))
+            (t
+             (remove-state client 'can-read-bio)
+             0)))))
+
+(defun write-octets-to-decrypt* (client vector from to)
+  "Send octets in VECTOR for decryption. Read result with SSL-READ later."
+  (with-pointer-to-vector-data (buffer vector)
+    (let ((written (bio-write (tls-endpoint-core-rbio client)
+                              (inc-pointer buffer from)
+                              (- to from))))
+      (unless (plusp written) (error "Bio-write failed"))
+      written)))
+
+(defun maybe-init-ssl (client)
+  "If SSL is not initialized yet, initialize it."
+  (cond
+    ((zerop (ssl-is-init-finished (tls-endpoint-core-ssl client)))
+     (handle-ssl-errors client (ssl-accept (tls-endpoint-core-ssl client))))
+    (t (remove-state client 'ssl-init-needed)
+       (add-state client 'can-read-bio))))
+
+;;;; Read SSL
+(defun ssl-read (client vec size)
+   "Move up to SIZE octets from the decrypted SSL ③ to the VEC.
+
+Return 0 when no data are available. Possibly remove CAN-READ-SSL and/or
+NEG-BIO-NEEDS-READ flags."
+   (let ((res
+          (with-pointer-to-vector-data (buffer vec)
+            (ssl-read% (tls-endpoint-core-ssl client) buffer size))))
+     (handle-ssl-errors client res)
+     (unless (= res size) (remove-state client 'can-read-ssl))
+     (max 0 res)))
+
+(defun ssl-peek (client max-size)
+   "Move up to SIZE octets from the decrypted SSL ③ to the VEC.
+
+Return 0 when no data are available."
+  (unless (null-pointer-p (tls-endpoint-core-ssl client))
+    (let* ((vec (make-octet-buffer max-size))
+           (res
+             (with-pointer-to-vector-data (buffer vec)
+               (http2/openssl::ssl-peek% (tls-endpoint-core-ssl client) buffer max-size))))
+      (handle-ssl-errors client res)
+      (values (subseq vec 0 (max 0 res)) res))))
