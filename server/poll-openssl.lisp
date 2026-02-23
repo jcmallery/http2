@@ -140,6 +140,7 @@ If ret>0 (no fail), returns nil."
        (when (zerop (bio-test-flags wbio bio-flags-should-retry))
          (error 'simple-communication-error :format-control "Retry flag should be set."
                                             :medium client))
+
        (error 'ssl-wants-write :medium client))
       ((= err-code ssl-error-want-read)
        ;; This is relevant for accept call and handled in loop
@@ -182,22 +183,25 @@ Raise error otherwise."
   (maybe-init-ssl function)
   (ssl-peek function))
 
+; TODO: rename to encrypt-vector
 (defun encrypt-some* (client vector from to)
   "Encrypt octets in VECTOR between FROM and TO. Return number of octets
-processed, or raise appropriate error. You can read the encrypted octets later by READ-ENCRYPTED-FROM-OPENSSL*."
+processed, or raise appropriate error. You can read the encrypted octets later
+by READ-ENCRYPTED-FROM-OPENSSL*."
   (with-pointer-to-vector-data (buffer vector)
-  (handler-case
-      (let* ((ssl (tls-endpoint-core-ssl client))
-             (res (ssl-write ssl (inc-pointer buffer from) (- to from))))
-        (cond
-          ((plusp res)
-           (add-state client 'can-read-bio)
-           res)
-          ;; no-star handle-ssl-errors masks SSL-WANTS-READ
-          (t (handle-ssl-errors* client res)
-             0)))
-    (ssl-blocked ()
-      (remove-state client 'can-write-ssl)))))
+    (handler-case
+        (let* ((ssl (tls-endpoint-core-ssl client))
+               (res (ssl-write ssl (inc-pointer buffer from) (- to from))))
+          (cond
+            ((plusp res)
+             (add-state client 'can-read-bio)
+             res)
+            ;; no-star handle-ssl-errors masks SSL-WANTS-READ
+            (t (handle-ssl-errors* client res)
+               0)))
+      (ssl-blocked ()
+        ;; CAN-WRITE-SSL is not same as NEG-BIO-NEEDS-READ
+        (remove-state client 'can-write-ssl)))))
 
 (defun bio-should-retry (wbio)
   (bio-test-flags wbio bio-flags-should-retry))
@@ -233,7 +237,7 @@ processed, or raise appropriate error. You can read the encrypted octets later b
     (t (remove-state client 'ssl-init-needed)
        (add-state client 'can-read-bio))))
 
-;;;; Read SSL
+;;;; Read decrypted data
 (defun ssl-read (client vec size)
    "Move up to SIZE octets from the decrypted SSL ③ to the VEC.
 
@@ -247,7 +251,9 @@ NEG-BIO-NEEDS-READ flags."
      (max 0 res)))
 
 (defun ssl-peek (client max-size)
-   "Move up to SIZE octets from the decrypted SSL ③ to the VEC.
+   "Copy up to SIZE octets from the decrypted SSL ③ to the VEC.
+
+This is intended for introspection and debugging, e.g., in DESCRIBE-OBJECT.
 
 Return 0 when no data are available."
   (unless (null-pointer-p (tls-endpoint-core-ssl client))
