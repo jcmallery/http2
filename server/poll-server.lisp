@@ -236,12 +236,7 @@ available. Raise an error on error." vector destination)
 
 (defun process-data-on-socket (client)
   "Read data from client socket ① and pass them to the tls buffer ② to decrypt."
-  (pull-once-push-bytes client #'read-from-peer #'decrypt-socket-octets)
-  (add-state client 'CAN-READ-SSL)
-  (add-state client 'can-write-ssl)
-  (unless (if-state client 'neg-bio-needs-read)
-    (add-state client 'neg-BIO-NEEDS-READ)
-    (add-state client 'CAN-READ-BIO)))
+  (pull-once-push-bytes client #'read-from-peer #'decrypt-socket-octets))
 
 ;;;; Encrypt queue
 (defun add-and-maybe-pass-data (client buffer new-data from to old-size cleaner)

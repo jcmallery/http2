@@ -196,12 +196,17 @@ later by READ-ENCRYPTED-FROM-OPENSSL*."
              0)))))
 
 (defun write-octets-to-decrypt* (client vector from to)
-  "Send octets in VECTOR for decryption. Read result with SSL-READ later."
+  "Send octets in VECTOR for decryption. Read result with SSL-READ later.
+
+When SSL receives data through the BIO channel, it possibly can be read from and
+written to again (or at least it could be tried)."
   (with-pointer-to-vector-data (buffer vector)
     (let ((written (bio-write (tls-endpoint-core-rbio client)
                               (inc-pointer buffer from)
                               (- to from))))
       (unless (plusp written) (error "Bio-write failed"))
+      (add-state client 'can-read-ssl)
+      (add-state client 'can-write-ssl)
       written)))
 
 (defun maybe-init-ssl (client)
