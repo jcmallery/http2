@@ -3,10 +3,10 @@
 (defsection @SSL (:title "SSL handling")
   "Wrapper library over openssl functions.
 
-@OPENSSL-ENDPOINT wraps the SSL parameter used in openssl functions.
+TLS-ENDPOINT-CORE wraps the SSL parameter used in openssl functions. The functions that use it are listed in @SSL-OPS.
 
-@OPENSSL-CONTEXT wraps the CTX parameter used in openssl functions"
-  (bio-should-retry function)
+"
+#+nil  (bio-should-retry function)
   (@openssl-endpoint section)
   (@openssl-context section)
   (@ssl-ops section)
