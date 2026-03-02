@@ -6,6 +6,10 @@
 
 (use-foreign-library openssl)
 
+(declaim (ftype (function * integer) ssl-get-error bio-test-flags err-get-error)
+         (inline ssl-write ssl-read% bio-read% bio-write ssl-is-init-finished
+                 ssl-peek%))
+
 (defcfun "BIO_new" :pointer (bio-method :pointer))
 (defcfun ("BIO_read" bio-read%) :int (bio-method :pointer) (data :pointer) (dlen :int))
 (defcfun "BIO_s_mem" :pointer)
