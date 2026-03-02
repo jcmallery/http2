@@ -53,7 +53,6 @@ MAKE-HTTP2-TLS-CONTEXT."
               (http2/server/poll::ssl-connect (http2/server/poll:client-ssl client))
               (http2/server/poll::add-state client 'http2/server/poll::can-read-bio)
               (http2/server/poll::do-available-actions client)
-              (encrypt-and-send client)
               (sleep 0.1) ; Naggle
               (http2/server/poll::add-state server 'http2/server/poll::can-read-port)
               (http2/server/poll::do-available-actions server)

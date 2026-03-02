@@ -32,14 +32,14 @@
 (defcfun "SSL_set_bio" :void (ssl :pointer) (rbio :pointer) (wbio :pointer))
 (defcfun "SSL_write" :int (ssl :pointer) (buffer :pointer) (bufsize :int))
 
-
 (defsection @openssl-endpoint (:title "TLS endpoint")
   "Wrap the SSL parameter used in openssl functions."
   (tls-endpoint-core type)
   (init-tls-endpoint-core function)
   (make-tls-endpoint-core function)
   (with-tls-endpoint-core macro)
-  (close-openssl function))
+  (close-openssl function)
+  (@poll-tls-states section))
 
 (locally
     (declare (special *initial-state*))
@@ -130,10 +130,6 @@ cleared by READ-ENCRYPTED-FROM-OPENSSL.  It triggets MOVE-ENCRYPTED-BYTES."
   "CAN-WRITE is set when writing to the output socket is possible (which usually
 is). It is set by HANDLE-CLIENT-IO and . It is cleared by SEND-TO-PEER and
 WRITE-DATA-TO-SOCKET. It triggers WRITE-DATA-TO-SOCKET."
-  "HAS-DATA-TO-WRITE is set when the write buffer for output socket is
-non-empty (or, not implemented, has enough data to make sending economical). It
-is set by READ-ENCRYPTED-FROM-OPENSSL and MOVE-ENCRYPTED-BYTES. It is cleared by
-WRITE-DATA-TO-SOCKET and triggers MOVE-ENCRYPTED-BYTES."
   "NEG-BIO-NEEDS-READ is set by PROCESS-DATA-ON-SOCKET and triggers
 MAYBE-INIT-SSL. It is cleared by an error condition in HANDLE-SSL-ERRORS."
   "SSL-INIT-NEEDED is maybe not needed?"
@@ -148,7 +144,7 @@ MAYBE-INIT-SSL. It is cleared by an error condition in HANDLE-SSL-ERRORS."
 (export '(neg-bio-needs-read peer-open has-data-to-encrypt can-write-ssl
           can-read-bio can-read-port can-read-ssl ssl-init-needed
           ; bio-s-mem bio-new ssl-new
-          ssl-set-accept-state can-write has-data-to-write
+          ssl-set-accept-state can-write
           bio-write ssl-read% ssl-error-condition err-reason-error-string
           bio-read% ssl-is-init-finished ssl-accept ssl-connect))
 
