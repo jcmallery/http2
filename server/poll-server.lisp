@@ -124,9 +124,6 @@ The actions are in general indicated by arrows in the diagram:
   (octets-needed 0 :type fixnum)
   (encrypt-buf-size 0 :type fixnum)
   (start-time (get-internal-real-time) :type fixnum)
-  ;; set of CAN-READ-PORT, CAN-READ-SSL, CAN-WRITE-SSL,
-  ;; CAN-READ-BIO, HAS-DATA-TO-WRITE, CAN-WRITE
-  ;; NEG-BIO-NEEDS-READ SSL-INIT-NEEDED
   (application-data))
 
 (defvar *tls-content-types*
@@ -235,6 +232,7 @@ available. Raise an error on error." vector destination)
               #'write-octets-to-decrypt vector from to))
 
 (defun process-data-on-socket (client)
+  ;; Trigger: CAN-READ-PORT &
   "Read data from client socket ① and pass them to the tls buffer ② to decrypt."
   (pull-once-push-bytes client #'read-from-peer #'decrypt-socket-octets))
 
@@ -317,8 +315,7 @@ Otherwise, use a temporary vector to write data "
 This should be called in a way friendly to Nagle algorithm. My understaning is
 this is either when we pipeline a lot of data, or when we send out somethinf
 that expects a response."
-  (pull-push-bytes client #'read-encrypted-from-openssl #'queue-encrypted-bytes)
-  (add-state client 'has-data-to-write))
+  (pull-push-bytes client #'read-encrypted-from-openssl #'queue-encrypted-bytes))
 
 ;;;; TCP write port
 (define-writer send-to-peer peer-out (client vector from to)
@@ -351,7 +348,6 @@ keep what did not fit."
                         #'send-to-peer
                         concated 0 (client-write-buf-size client))))
       (cond ((= written (client-write-buf-size client))
-             (remove-state client 'has-data-to-write)
              (setf (client-write-buf-size client) 0))
             ((plusp written)
              (remove-state client 'can-write)
@@ -386,7 +382,7 @@ TLS-SERVER/MEASURE::ACTIONS clip on this function."
   (cond
     ((if-state client 'can-read-port) #'process-data-on-socket)
     ((and (if-state client 'ssl-init-needed)
-          (if-state client 'neg-bio-needs-read))
+          (if-state client 'can-read-ssl))
      #'maybe-init-ssl)
     ((if-state client 'can-read-ssl)
      (if (plusp (client-octets-needed client))
@@ -398,7 +394,7 @@ TLS-SERVER/MEASURE::ACTIONS clip on this function."
           (if-state client 'can-write-ssl))
      #'encrypt-data)
     ((if-state client 'can-read-bio) #'move-encrypted-bytes)
-    ((and (if-state client 'has-data-to-write)
+    ((and (plusp (client-write-buf-size client))
           (if-state client 'can-write))
      #'write-data-to-socket)
     (t nil)))
@@ -613,8 +609,9 @@ reading of the client hello."
                            (unless (eql #'parse-frame-header (client-io-on-read client))
                              (warn "Poll error for ~a: ~d" client err-or-hup))
                            (signal 'done))
-                         (and (if-state client 'has-data-to-write)
-                              (not (if-state client 'can-write))))))
+                         (and
+                          (plusp (client-write-buf-size client))
+                          (not (if-state client 'can-write))))))
 
 (defun setup-new-connect-pollfd (fdset listening-socket)
   (add-socket-to-fdset% fdset (sb-bsd-sockets:socket-file-descriptor (usocket:socket listening-socket))
