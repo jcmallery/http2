@@ -498,6 +498,36 @@ As always, use untrace to stop tracing."
                      (incf start (length datum))))
                  data)))
 
+(defun write-data-frame-region (stream source source-offset payload-length
+                                &key padded end-stream)
+  "Write a DATA frame from SOURCE[SOURCE-OFFSET..SOURCE-OFFSET+PAYLOAD-LENGTH).
+Like WRITE-DATA-FRAME but copies only the specified region into the frame
+buffer, avoiding an intermediate SUBSEQ allocation when sending a portion of
+a larger buffer as a single DATA frame."
+  (declare (type (simple-array (unsigned-byte 8) (*)) source)
+           (type fixnum source-offset payload-length)
+           (optimize (speed 3)))
+  (let* ((padded-length (padded-length payload-length padded))
+         (buffer (make-octet-buffer (+ 9 padded-length)))
+         (keys (list :end-stream end-stream)))
+    (declare (dynamic-extent keys))
+    (write-frame-header-to-vector buffer 0 padded-length +data-frame+
+                                  (flags-to-code keys)
+                                  (get-stream-id stream) nil)
+    (let ((frame-start (cond (padded (setf (aref buffer 9) (length padded)) 10)
+                             (t 9))))
+      (replace buffer source :start1 frame-start
+                             :start2 source-offset
+                             :end2 (the fixnum (+ source-offset payload-length)))
+      (when padded
+        (replace buffer padded :start1 (- (length buffer) (length padded)))))
+    (account-write-window-contribution (get-connection stream)
+                                       stream payload-length)
+    (queue-frame (get-connection stream) buffer)
+    (when end-stream
+      (change-state-on-write-end stream))
+    buffer))
+
 (define-frame-writer 8 write-window-update-frame stream-or-connection nil 4
   ((window-size-increment 31)) ((reserved t)) "```
     +-+-------------------------------------------------------------+
