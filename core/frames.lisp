@@ -402,6 +402,7 @@ frame header (9 octets) and padding octets.
 
 The payload is generated using WRITER object. The WRITER takes CONNECTION and
 PARS as its parameters."
+  (declare (dynamic-extent pars))
   (let* ((padded (getf keys :padded))
          (padded-length (padded-length length padded))
          (buffer (make-octet-buffer (+ 9 padded-length))))
@@ -443,7 +444,7 @@ PARS as its parameters."
   (declare (type (unsigned-byte 24) length)
            (type (frame-code-type) type)
            (type (unsigned-byte 8) flags)
-           (type (simple-array (unsigned-byte 8)) vector)
+           (type octet-vector vector)
            (type stream-id stream-id))
   (setf (aref vector start) (ldb (byte 8 16) length))
   (setf (aref vector (incf start)) (ldb (byte 8 8) length))
@@ -482,7 +483,7 @@ PARS as its parameters."
 
 This function is primarily factored out to be TRACEd to see arriving frames."
   (declare (optimize speed)
-           ((simple-array (unsigned-byte 8) *) header)
+           (octet-vector header)
            (fixnum start)
            ((simple-array t *) *frame-types*))
   (let* ((length (aref/wide header start 3))
