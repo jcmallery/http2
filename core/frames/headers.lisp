@@ -333,7 +333,7 @@ expected, and then it is parsed by a different function."
   (values
    (lambda (connection header &optional (start 0) (end (length header)))
      (declare
-      ((simple-array (unsigned-byte 8) *) header old-data)
+      (octet-vector header old-data)
       ((integer 0 #.array-dimension-limit) start end))
      (assert (= 9 (- end start)))
      (multiple-value-bind (frame-type-object length flags http-stream R)
@@ -369,7 +369,7 @@ expected, and then it is parsed by a different function."
              (t
               (values (lambda (connection data start end)
                         (declare (ignore connection))
-                        (declare ((simple-array (unsigned-byte 8) *) data))
+                        (declare (octet-vector data))
                         (let ((full-data (make-octet-buffer (+ length
                                                                (- old-data-end old-data-start)))))
                           (unless (= old-data-start old-data-end)
