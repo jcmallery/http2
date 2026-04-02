@@ -1,44 +1,33 @@
 ;;;; -*- Mode: lisp; Syntax: ansi-common-lisp; Package: http2/resources; Base: 10 -*-
-;;;;
-;;;; Global Buffer Pool for HTTP/2
-;;;;
-;;;; Lock-free size-class pooling of octet buffers via CAS (Treiber
-;;;; stack).  Eliminates allocation in hot paths: frame reading, frame
-;;;; writing, payload processing.
-;;;;
-;;;; One global pool shared by all connections.  Buffers grow on demand
-;;;; and recycle indefinitely.  Max-free cap per size class prevents
-;;;; unbounded growth after traffic spikes.
-;;;;
-;;;; Size classes: small (<=16), medium (<=1024), large (<=16384).
-;;;; Oversized buffers are allocated directly and not pooled.
-;;;;
 
-(defpackage http2/resources
-  (:use :common-lisp)
-  (:export
-   ;; CAS primitives (available for other lock-free patterns)
-   "ATOMIC-PUSH"
-   "ATOMIC-POP"
-   ;; Buffer pool
-   "ALLOCATE-BUFFER"
-   "DEALLOCATE-BUFFER"
-   "WITH-POOLED-BUFFER"
-   "BUFFER-POOL-STATS"
-   "CLEAR-BUFFER-POOL"
-   ;; Buffer regions (scope-based deallocation)
-   "WITH-RESOURCE-USAGE-REGION"
-   "REGION-TRACK-BUFFER"))
+(in-package :http2/buffer-pool)
 
-(in-package :http2/resources)
+(defsection @buffer-pool (:title "Global Buffer Pool for HTTP/2")
+  "Lock-free size-class pooling of octet buffers via CAS (Treiber
+stack).  Eliminates allocation in hot paths: frame reading, frame
+writing, payload processing.
 
-;;;-------------------------------------------------------------------
-;;;
-;;; COMPARE-AND-SWAP PRIMITIVES
-;;;
-;;; Lock-free atomic push/pop on a cons cell head pointer.
-;;; Port-specific CAS with generic fallback.
-;;;
+One global pool shared by all connections.  Buffers grow on demand
+and recycle indefinitely.  Max-free cap per size class prevents
+unbounded growth after traffic spikes.
+
+Size classes: small (<=16), medium (<=1024), large (<=16384).
+Oversized buffers are allocated directly and not pooled."
+
+  (allocate-buffer function)
+  (deallocate-buffer function)
+  (with-pooled-buffer macro)
+  (buffer-pool-stats function)
+  (clear-buffer-pool function)
+  (@buffer-regions section)
+  (@cas section))
+
+(defsection @cas (:title "CAS primitives")
+  "Lock-free atomic push/pop on a cons cell head pointer.
+
+Port-specific CAS with generic fallback."
+  (atomic-push function)
+  (atomic-pop function))
 
 #+sbcl
 (defmacro %cas (place old new)
@@ -210,18 +199,16 @@ VAR may be larger than SIZE — use :end to delimit the active region."
             (progn ,@body)
          (deallocate-buffer ,buf-var)))))
 
-;;;-------------------------------------------------------------------
-;;;
-;;; BUFFER REGIONS
-;;;
-;;; Scope-based deallocation for buffers whose lifetime extends beyond
-;;; the immediate allocator.  The caller manages buffers locally on the
-;;; hot path (zero tracking overhead).  When a buffer escapes local
-;;; management (e.g., captured by a continuation closure), the caller
-;;; transfers deallocation responsibility to the region via
-;;; REGION-TRACK-BUFFER.  On region exit, all tracked buffers are
-;;; returned to the pool.
-;;;
+(defsection @buffer-regions (:title "Buffer regions")
+  "Scope-based deallocation for buffers whose lifetime extends beyond
+the immediate allocator.  The caller manages buffers locally on the
+hot path (zero tracking overhead).  When a buffer escapes local
+management (e.g., captured by a continuation closure), the caller
+transfers deallocation responsibility to the region via
+REGION-TRACK-BUFFER.  On region exit, all tracked buffers are
+returned to the pool."
+  (with-resource-usage-region macro)
+  (region-track-buffer function))
 
 (defvar *current-buffer-region* nil
   "Active buffer region tracking list, or NIL.
