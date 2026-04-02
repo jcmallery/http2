@@ -37,15 +37,18 @@ May block."
         with frame-action = initial-action
         and size = initial-size
         and stream = (get-network-stream connection)
+        ;; Reusable buffer for 9-byte frame headers (the common case).
+        ;; Payload buffers vary in size and are allocated per frame.
+        and header-buf = (make-octet-buffer 9)
                   ;; Prevent ending when waiting for payload
         while (or (null just-pending)
                   (listen stream)
                   (not (eql #'parse-frame-header frame-action)))
         do
            (force-output stream)
-           (let* ((buffer (make-octet-buffer size))
-                  (read (read-sequence buffer stream)))
-             (declare (dynamic-extent buffer))
+           (let* ((buffer (cond ((= size 9) header-buf)
+                                (t (make-octet-buffer size))))
+                  (read (read-sequence buffer stream :end size)))
              (cond
                ((= size read)
                 (multiple-value-setq
