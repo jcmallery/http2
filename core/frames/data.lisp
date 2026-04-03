@@ -607,7 +607,7 @@ As always, use untrace to stop tracing."
     nil
     nil)
 
-(defun write-data-frame (stream data &rest keys &key padded end-stream (start 0) (length (length data)))
+(defun write-data-frame (stream data &key padded end-stream (start 0) (length (length data)))
   "```
   +---------------+-----------------------------------------------+
   |                            Data (*)                         ...
@@ -617,14 +617,7 @@ As always, use untrace to stop tracing."
   DATA frames (type=0x0) convey arbitrary, variable-length sequences of
   octets associated with a stream.  One or more DATA frames are used,
   for instance, to carry HTTP request or response payloads."
-  (declare (ignore padded end-stream)
-           (octet-vector data))
-  (write-frame stream length +data-frame+ keys
-               (lambda (buffer frame-start data)
-                 (account-write-window-contribution (get-connection stream)
-                                                    stream length)
-                 (replace buffer data :start1 frame-start :start2 start))
-               data))
+  (write-data-frame-region stream data start length :padded padded :end-stream end-stream))
 
 (defun write-data-frame-region (stream data start length &rest keys &key padded end-stream)
   "```
@@ -638,12 +631,9 @@ As always, use untrace to stop tracing."
   for instance, to carry HTTP request or response payloads."
   (declare (ignore padded end-stream)
            (octet-vector data))
-  (write-frame stream length +data-frame+ keys
-               (lambda (buffer frame-start data)
-                 (account-write-window-contribution (get-connection stream)
-                                                    stream length)
-                 (replace buffer data :start1 frame-start :start2 start))
-               data))
+  (write-vector-frame stream  +data-frame+ keys data start length)
+  (account-write-window-contribution (get-connection stream)
+                                     stream length))
 
 (defun write-data-frame-multi (stream data &rest keys &key end-stream)
   "Write a data frame that includes DATA - that is a sequence of octet vectors."
