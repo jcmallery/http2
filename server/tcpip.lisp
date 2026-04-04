@@ -116,6 +116,8 @@ Otherwise signal an error."
   "See man errno(3). "
   (mem-ref (errno%) :int))
 
+(declaim (ftype (function * integer) errno))
+
 ;;;; Polling stuff
 (defcfun ("poll" poll%) :int "Synchronous I/O multiplexing. Called by POLL."
   (fdset :pointer) (rb :int) (timeout :int))

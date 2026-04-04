@@ -14,9 +14,13 @@
   (frame-context class)
   (flush-http2-data generic-function))
 
+(declaim (ftype (function (t) frame-size) get-max-peer-frame-size))
+
 (defclass frame-context ()
-  ((max-frame-size           :accessor get-max-frame-size           :initarg :max-frame-size)
-   (max-peer-frame-size      :accessor get-max-peer-frame-size      :initarg :max-peer-frame-size))
+  ((max-frame-size           :accessor get-max-frame-size           :initarg :max-frame-size
+                             :type frame-size)
+   (max-peer-frame-size      :accessor get-max-peer-frame-size      :initarg :max-peer-frame-size
+                             :type frame-size))
   (:default-initargs :max-frame-size 16384
                      :max-peer-frame-size 16384))
 

@@ -115,7 +115,7 @@ pretending that connection of connection is the same connection can be useful."
   (stream-collection class)
   (server-stream class))
 
-(defclass http2-stream (http2-stream-minimal flow-control-mixin)
+(defclass http2-stream (http2-stream-minimal buffered-stream)
   ((data             :accessor get-data             :initarg :data)
    (weight           :accessor get-weight           :initarg :weight)
    (depends-on       :accessor get-depends-on       :initarg :depends-on)
