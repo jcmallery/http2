@@ -258,8 +258,7 @@ optionally prints activities."))
 (defclass vanilla-server-stream (server-stream
                                  utf8-parser-mixin fallback-all-is-ascii  text-collecting-stream
                                  http2/core::header-collecting-mixin
-                                 body-collecting-mixin
-                                 multi-part-data-stream)
+                                 body-collecting-mixin)
   ()
   (:documentation
    "A server-side stream that can be used as a binary output stream, optionally
