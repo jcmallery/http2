@@ -24,7 +24,18 @@
 (defclass client-stream (http2-stream)
   ((status :accessor get-status :initarg :status
            :documentation
-           "HTTP status code field (see [RFC7231], Section 6)"))
+           "HTTP status code field (see [RFC7231], Section 6)")
+   ;; Request pseudo-header slots.  These are set when the client sends
+   ;; a request and are read by log-closed-stream and similar diagnostic
+   ;; code that handles any h2-stream (client or server) uniformly.
+   (http2/core::method    :accessor http2/core:get-method
+                          :initarg :method    :initform nil)
+   (http2/core::scheme    :accessor http2/core:get-scheme
+                          :initarg :scheme    :initform nil)
+   (http2/core::authority :accessor http2/core:get-authority
+                          :initarg :authority :initform nil)
+   (http2/core::path      :accessor http2/core:get-path
+                          :initarg :path      :initform nil))
   (:default-initargs :status nil)
   (:documentation
    "HTTP2 stream that checks headers as required for clients (no psedoheader other
