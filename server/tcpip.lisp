@@ -343,12 +343,16 @@ follow later (EAGAIN)."
 (defun fd-to-ip (fd)
   (with-foreign-objects ((addr '(:struct sockaddr-in)) (len :int))
     (setf (mem-ref len :int) size-of-sockaddr-in)
-    (checked-syscall #'zerop #'getpeername fd addr len)
-    (assert (= (mem-ref len :int) size-of-sockaddr-in))
-    (with-foreign-slots ((sin-family sin-port sin-addr) addr (:struct sockaddr-in))
-      (values (format nil "~a.~a.~a.~a:~a"
-                      (ldb (byte 8 0) sin-addr)
-                      (ldb (byte 8 8) sin-addr)
-                      (ldb (byte 8 16) sin-addr)
-                      (ldb (byte 8 24) sin-addr)
-                      (htons sin-port))))))
+    (handler-case
+        (progn
+          (checked-syscall #'zerop #'getpeername fd addr len)
+          (assert (= (mem-ref len :int) size-of-sockaddr-in))
+          (with-foreign-slots ((sin-family sin-port sin-addr) addr (:struct sockaddr-in))
+            (values (format nil "~a.~a.~a.~a:~a"
+                            (ldb (byte 8 0) sin-addr)
+                            (ldb (byte 8 8) sin-addr)
+                            (ldb (byte 8 16) sin-addr)
+                            (ldb (byte 8 24) sin-addr)
+                            (htons sin-port)))))
+      (error ()
+        (values "Unknown" 0)))))
