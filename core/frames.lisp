@@ -79,6 +79,16 @@ Existing implementations are for:
     (write-sequence frame (get-network-stream connection))
     frame))
 
+(defgeneric queue-frame-region (connection data start length)
+  (:documentation "Send or queue LENGTH octets of DATA starting at START to the connection
+
+Must use the data immediately.")
+  (:method (connection data start length)
+    "Fallback using QUEUE-FRAME."
+    (queue-frame connection (subseq data start (+ start length))))
+  (:method ((connection stream-based-connection-mixin) frame start length)
+    (write-sequence frame (get-network-stream connection) :start start :end (+ start length))))
+
 (defsection @frames-api
     (:title "API for sending and receiving frames")
   "![image](../frames.png) There are several main low-level components:
@@ -397,6 +407,25 @@ Each PARAMETER is a list of name, size in bits or type specifier and documentati
                               :flag-keywords
                               ',(mapcar (lambda (a) (intern (symbol-name a) :keyword))
                                         flags))))))
+
+(defun write-vector-frame (http-connection-or-stream type-code keys payload start length)
+  "Optimized version to write frame when the payload is already prepared as an octet vector."
+  (let* ((padded (getf keys :padded))
+         (padded-length (padded-length length padded))
+         (buffer (make-octet-buffer (+ 9 (if padded 1 0))))
+         (connection (get-connection http-connection-or-stream)))
+    (write-frame-header-to-vector buffer 0 padded-length type-code (flags-to-code keys)
+                                  (get-stream-id http-connection-or-stream) nil)
+    (when padded (setf (aref buffer 9) (length padded)))
+    ;; This assumes:
+    ;; - only one thread talks to the connection,
+    ;; - the queue-frame and caller agree on who owns the buffer. Presently, all queue-frame I know about use the payload vector immediately.
+    (queue-frame connection buffer)
+    (queue-frame-region connection payload start length)
+    (when padded (queue-frame connection padded))
+    (when (getf keys :end-stream)
+      (change-state-on-write-end http-connection-or-stream))
+    buffer))
 
 (defun write-frame (http-connection-or-stream length type-code keys
                     writer &rest pars)

@@ -109,8 +109,10 @@ subclasses. Application must handle it, including closing associated
 NETWORK-STREAM."))
 
 (defmethod print-object ((ce connection-error) out)
-  (print-unreadable-object (ce out :type t)
-    (format out "on ~a" (get-connection ce))))
+  (if *print-escape*
+      (print-unreadable-object (ce out :type t)
+        (format out "on ~a" (get-connection ce)))
+      (call-next-method)))
 
 (define-condition protocol-error (connection-error)
   ()
@@ -119,12 +121,10 @@ NETWORK-STREAM."))
 (define-condition client-preface-mismatch (protocol-error)
   ((received :accessor get-received :initarg :received))
   (:documentation "HTTPS server expects a specific sequence of octets at the start of the new
-connection. The client sent something different."))
-
-(defmethod print-object ((err client-preface-mismatch) out)
-  (with-slots (received) err
-    (print-unreadable-object (err out :type t)
-      (format out "~a ~a" received  (map 'string 'code-char received)))))
+connection. The client sent something different.")
+  (:report (lambda (err out)
+             (with-slots (received) err
+               (format out "Client did not sent the client preface, but ~a"  (map 'string 'code-char received))))))
 
 (define-condition too-big-frame (connection-error)
   ((max-frame-size :accessor get-max-frame-size :initarg :max-frame-size)
@@ -216,9 +216,7 @@ Base class for more detailed errors."))
                   (or (documentation (class-of err) t)
                       (documentation (get-error-name code) 'variable))
                   stream))
-        (format out "~a"
-                (or (documentation (class-of err) t)
-                    (documentation (get-error-name code) 'variable))))))
+        (call-next-method))))
 
 (define-condition http-stream-error-received (http-stream-error)
   ())
@@ -232,32 +230,30 @@ Base class for more detailed errors."))
 (define-condition incorrect-frame-size (http-stream-error)
   ()
   (:default-initargs :code +frame-size-error+)
-  (:documentation
-   "Received a PRIORITY frame with a length other than 5 octets (Section 5.4.2)"))
+  (:report
+   "We received a PRIORITY frame with a length other than 5 octets (Section 5.4.2)"))
 
 (define-condition incorrect-rst-frame-size (connection-error)
   ()
   (:default-initargs :code +frame-size-error+)
-  (:documentation
-   "Received a RST_STREAM frame with a length other than 4 octets (Section 5.4.1)"))
+  (:report
+   "We received a RST_STREAM frame with a length other than 4 octets (Section 5.4.1)"))
 
 (define-condition incorrect-settings-frame-size (connection-error)
   ()
   (:default-initargs :code +frame-size-error+)
   (:documentation
-   "Received a SETTINGS frame with a length other than a multiple of 6 (Section 5.4.1)"))
+   "We received a SETTINGS frame with a length other than a multiple of 6 (Section 5.4.1)"))
 
 (define-condition incorrect-ping-frame-size (connection-error)
   ()
   (:default-initargs :code +frame-size-error+)
   (:documentation
-   "Received PING frame with a length field value other than 8 (Section 5.4.1)"))
+   "We received PING frame with a length field value other than 8 (Section 5.4.1)"))
 
 (define-condition incorrect-window-update-frame-size (connection-error)
   ()
-  (:default-initargs :code +frame-size-error+)
-  (:documentation
-   "Receipt of a PING frame with a length field value other than 8 MUST be treated as a connection error (Section 5.4.1) of type FRAME_SIZE_ERROR."))
+  (:default-initargs :code +frame-size-error+))
 
 (define-condition unexpected-continuation-frame (protocol-error)
   ()
@@ -265,12 +261,13 @@ Base class for more detailed errors."))
    "A CONTINUATION frame MUST be preceded by a HEADERS, PUSH_PROMISE or
    CONTINUATION frame without the END_HEADERS flag set.  A recipient that
    observes violation of this rule MUST respond with a connection error (Section
-   5.4.1) of type PROTOCOL_ERROR."))
+   5.4.1) of type PROTOCOL_ERROR.")
+  (:report "Continuation frame received when not expected."))
 
 (define-condition stream-protocol-error (http-stream-error)
   ()
   (:default-initargs :code +protocol-error+)
-  (:documentation "We detected some kind of protocol error."))
+  (:report "We detected some kind of protocol error."))
 
 (define-condition header-error (stream-protocol-error)
   ((name :accessor get-name :initarg :name)

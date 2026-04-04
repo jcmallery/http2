@@ -1,4 +1,4 @@
-;;;; Copyright 2022-2024 by Tomáš Zellerin
+;;;; Copyright 2022-2026 by Tomáš Zellerin
 
 (in-package :http2/core)
 
